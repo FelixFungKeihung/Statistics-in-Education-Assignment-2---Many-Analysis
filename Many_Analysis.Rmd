@@ -1,0 +1,634 @@
+---
+title: "Assignment 2 - Many Analysts"
+author: "Felix Feng, Eunice Lyu, Ke Wan, Zhaocheng Fan"
+output: html_document
+date: "2025-03-05"
+editor_options: 
+  markdown: 
+    wrap: 72
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Abstract
+This study investigates the effect of statistics anxiety on university students’ academic attainment. We first fit a simple linear regression model between $Grade \sim STARS$, where STARS measures Statistics Anxiety Rating Scale. The result formula is given by
+$$
+Grade = 74.51 - 1.79\times avg(STARS).
+$$
+
+This model is statistically significant with small p values. However, $r^2$ of $0.01$ indicates a weak influence. By effect size and power analysis, this model has Cohen's d $d = -0.206$, with $95\%$CI = [$-0.316$, $-0.096$] based on $N = 1277$, and a sample size of $745$ is required for STARS to reach $80\%$ power. To discover better fit, we use polynomial linear regression and apply exhaustive indexing to loop over variables STARS, R-TAS, R-MARS, STICSA. The final model is given by: 
+$$
+Grade = 60.18 -  0.35(avg(STARS))^2 - 0.12(avg(R-TAS))^3 + 9.73(avg(STICSA))^{0.5}
+$$
+
+The model is significant and $r^2$ increases to $0.02$. 
+
+## Summary of the Analysis Approach
+
+We removed unreliable survey responses using built-in attention checks and a 5% time-progress ratio threshold, leaving 1,277 valid participants. We then extracted and rescaled the following variables: `STARS`, `R-MARS`, `R-TAS`, `STICSA-Trait`, and `grade`. 
+A linear regression between `grade` and `STARS` was fitted, revealing a statistically significant relationship (\(p < 0.05\)). To further explore the relationship between statistics anxiety and attainment, we tested multiple polynomial regression models (exponents from 0.5 to 3). The final model was selected based on statistical significance and the highest R-squared value.
+
+
+## Introduction
+
+Statistics anxiety is a prevalent issue among students in higher education, often affecting academic performance. This report explores the relationship between statistics anxiety and attainment, focusing on the Statistics Anxiety Rating Scale (STARS) while also considering other dimensions of anxiety, including math-related (R-MARS), test-related (R-TAS), and trait anxiety (STICSA). 
+Using the SMARVUS dataset (Terry et al., 2023), which comprises a large cross-institutional sample, we investigate how these different forms of anxiety relate to course grades. The study aims to identify the distinct effect of STARS and provide insights into improving academic outcomes by addressing statistics anxiety.
+
+
+
+# Data Preperation
+
+### Data Cleaning Progress
+
+To clean data, we first remove unreliable survey responses by build-in attention check and a 5% time-progress ratio boundary. Then we extract all the variables we need. On anxiety side, we averaged the different anxieties separately. On grade side, we first remove "Not Applicable" values and NA values. Then we rescale character grades based on variable "grade_category_notes"; for chracter grades with empty notes, we search the university website for information. Additionally, we remove all percentage signs in grade leaving a hundred-scaled grade. For non-hundred-scaled numeric grade, we multiply their score by a ratio of 100 and their full grade. Please see our sample code below.
+
+```{r, message=FALSE, echo=FALSE, warning=FALSE}
+# packages
+library(dplyr)
+library(tidyverse)
+library(ez)
+library(data.table)
+library(effectsize)
+library(effsize)
+library(gridExtra)
+library(pwr)
+library(purrr)
+library(furrr)
+library(plotly)
+```
+
+```{r, message=FALSE, echo=FALSE}
+
+# load data
+df = read.csv("C:\\Users\\FungK\\Desktop\\MATH Y4\\SE\\A2\\smarvus_complete_050524.csv") # Replace file path
+```
+
+```{r, echo = FALSE, message=FALSE, warning=FALSE}
+# Add time progress ratio
+df_1 <- df %>%
+  mutate(time_progress_ratio = duration / progress)
+
+# current set bound to 0.05
+lower_bound_ratio <- quantile(df_1$time_progress_ratio, 0.05, na.rm = TRUE)
+upper_bound_ratio <- quantile(df_1$time_progress_ratio, 0.95, na.rm = TRUE)
+df_clean_ratio_1 <- df_1 %>% filter(time_progress_ratio >= lower_bound_ratio)
+df_clean_ratio_final <- df_clean_ratio_1 %>% filter(time_progress_ratio <= upper_bound_ratio)
+
+# Filter agreed : only agreed surveys will be counted
+df_filter_attention <- df_clean_ratio_final%>%
+  filter(attention_amnesty == "Yes")
+
+# Filter attention checks
+df_filter_attention_1 <- df_filter_attention%>%
+  filter(Q7.1_24 == "1")%>%
+  filter(Q8.1_21 == "5")%>%
+  filter(Q9.1_22 == "1")%>%
+  filter(Q11.1_9 == "3")%>%
+  filter(Q13.1_17 == "2")%>%
+  filter(Q15.1_9 == "4")
+```
+
+
+```{r, echo = FALSE, message=FALSE, warning=FALSE}
+# Mutate anx scores by cat
+df_mutate <- df_filter_attention_1 %>%
+  mutate(
+    STARS = rowMeans(select(., starts_with("Q7.1_")) %>% select(-Q7.1_24), na.rm = TRUE),
+    RMARS = rowMeans(select(., starts_with("Q7.2_")), na.rm = TRUE),
+    RTAS = rowMeans(select(., starts_with("Q10.1_")), na.rm = TRUE),
+    STICSA = rowMeans(select(., starts_with("Q9.1_")) %>% select(-Q9.1_22), na.rm = TRUE)
+  )
+# Clean df: clear non-well-explained grades
+df_clean_with_grade <- df_mutate %>%
+  select(
+    STARS,
+    RMARS,
+    RTAS,
+    STICSA,
+    grade,
+    survey_id,  # Ensure survey_id is present
+    scale_exam_single, 
+    scale_exam_single_yes_specify, 
+    scale_exam_single_no_specify, 
+    grade_category_notes
+  ) %>%
+  mutate(grade = na_if(grade, "Not Available")) %>%
+  filter(!is.na(grade)) %>%
+  filter(grade != "-")%>%
+  group_by(survey_id) %>% 
+  mutate(
+    scale_exam_single = ifelse(all(is.na(scale_exam_single)), NA, first(na.omit(scale_exam_single))), 
+    scale_exam_single_yes_specify = ifelse(all(is.na(scale_exam_single_yes_specify)), NA, first(na.omit(scale_exam_single_yes_specify))), 
+    scale_exam_single_no_specify = ifelse(all(is.na(scale_exam_single_no_specify)), NA, first(na.omit(scale_exam_single_no_specify))), 
+    grade_category_notes = ifelse(all(is.na(grade_category_notes)), NA, first(na.omit(grade_category_notes)))
+  ) %>%
+  ungroup()%>%
+  separate_rows(grade, sep = ",")
+
+df_clean_with_grade <- df_clean_with_grade %>%
+  mutate(grade = gsub("%", "", grade) 
+  )%>%
+  mutate(
+    # Convert character grades based on the first scale
+    grade = case_when(
+      grade == "A" & grade_category_notes == "A > 80, 75 < B+ ≤ 80, 69 < B ≤ 75, 60 < C+ ≤ 69, 55 < C ≤ 60, 50 < D+ ≤ 55, 44 < D ≤ 50, E < 44" ~ 90,
+      grade == "B+" & grade_category_notes == "A > 80, 75 < B+ ≤ 80, 69 < B ≤ 75, 60 < C+ ≤ 69, 55 < C ≤ 60, 50 < D+ ≤ 55, 44 < D ≤ 50, E < 44" ~ 77.5,
+      grade == "B" & grade_category_notes == "A > 80, 75 < B+ ≤ 80, 69 < B ≤ 75, 60 < C+ ≤ 69, 55 < C ≤ 60, 50 < D+ ≤ 55, 44 < D ≤ 50, E < 44" ~ 72,
+      grade == "C+" & grade_category_notes == "A > 80, 75 < B+ ≤ 80, 69 < B ≤ 75, 60 < C+ ≤ 69, 55 < C ≤ 60, 50 < D+ ≤ 55, 44 < D ≤ 50, E < 44" ~ 64.5,
+      grade == "C" & grade_category_notes == "A > 80, 75 < B+ ≤ 80, 69 < B ≤ 75, 60 < C+ ≤ 69, 55 < C ≤ 60, 50 < D+ ≤ 55, 44 < D ≤ 50, E < 44" ~ 57.5,
+      grade == "D+" & grade_category_notes == "A > 80, 75 < B+ ≤ 80, 69 < B ≤ 75, 60 < C+ ≤ 69, 55 < C ≤ 60, 50 < D+ ≤ 55, 44 < D ≤ 50, E < 44" ~ 52.5,
+      grade == "D" & grade_category_notes == "A > 80, 75 < B+ ≤ 80, 69 < B ≤ 75, 60 < C+ ≤ 69, 55 < C ≤ 60, 50 < D+ ≤ 55, 44 < D ≤ 50, E < 44" ~ 47,
+      grade == "E" & grade_category_notes == "A > 80, 75 < B+ ≤ 80, 69 < B ≤ 75, 60 < C+ ≤ 69, 55 < C ≤ 60, 50 < D+ ≤ 55, 44 < D ≤ 50, E < 44" ~ 0,
+      
+      # Convert character grades based on the second scale
+      grade == "A1" & grade_category_notes == ">80 = A1, 75-79 = A2, 70-74 = B1, 65-69 = B2, 60-64 = B3, 55-59 = C1, 50-54 = C2, 45-49 = C3, 40-44 = D1, 35-39 = D2, <35 = F" ~ 90,
+      grade == "A2" & grade_category_notes == ">80 = A1, 75-79 = A2, 70-74 = B1, 65-69 = B2, 60-64 = B3, 55-59 = C1, 50-54 = C2, 45-49 = C3, 40-44 = D1, 35-39 = D2, <35 = F" ~ 77,
+      grade == "B1" & grade_category_notes == ">80 = A1, 75-79 = A2, 70-74 = B1, 65-69 = B2, 60-64 = B3, 55-59 = C1, 50-54 = C2, 45-49 = C3, 40-44 = D1, 35-39 = D2, <35 = F" ~ 72,
+      grade == "B2" & grade_category_notes == ">80 = A1, 75-79 = A2, 70-74 = B1, 65-69 = B2, 60-64 = B3, 55-59 = C1, 50-54 = C2, 45-49 = C3, 40-44 = D1, 35-39 = D2, <35 = F" ~ 67,
+      grade == "B3" & grade_category_notes == ">80 = A1, 75-79 = A2, 70-74 = B1, 65-69 = B2, 60-64 = B3, 55-59 = C1, 50-54 = C2, 45-49 = C3, 40-44 = D1, 35-39 = D2, <35 = F" ~ 62,
+      grade == "C1" & grade_category_notes == ">80 = A1, 75-79 = A2, 70-74 = B1, 65-69 = B2, 60-64 = B3, 55-59 = C1, 50-54 = C2, 45-49 = C3, 40-44 = D1, 35-39 = D2, <35 = F" ~ 57,
+      grade == "C2" & grade_category_notes == ">80 = A1, 75-79 = A2, 70-74 = B1, 65-69 = B2, 60-64 = B3, 55-59 = C1, 50-54 = C2, 45-49 = C3, 40-44 = D1, 35-39 = D2, <35 = F" ~ 52,
+      grade == "C3" & grade_category_notes == ">80 = A1, 75-79 = A2, 70-74 = B1, 65-69 = B2, 60-64 = B3, 55-59 = C1, 50-54 = C2, 45-49 = C3, 40-44 = D1, 35-39 = D2, <35 = F" ~ 47,
+      grade == "D1" & grade_category_notes == ">80 = A1, 75-79 = A2, 70-74 = B1, 65-69 = B2, 60-64 = B3, 55-59 = C1, 50-54 = C2, 45-49 = C3, 40-44 = D1, 35-39 = D2, <35 = F" ~ 42,
+      grade == "D2" & grade_category_notes == ">80 = A1, 75-79 = A2, 70-74 = B1, 65-69 = B2, 60-64 = B3, 55-59 = C1, 50-54 = C2, 45-49 = C3, 40-44 = D1, 35-39 = D2, <35 = F" ~ 37,
+      grade == "F" & grade_category_notes == ">80 = A1, 75-79 = A2, 70-74 = B1, 65-69 = B2, 60-64 = B3, 55-59 = C1, 50-54 = C2, 45-49 = C3, 40-44 = D1, 35-39 = D2, <35 = F" ~ 0,
+      
+      # Convert character grades based on york_can from "https://calendars.students.yorku.ca/2023-2024/grades-and-grading-schemes" as no mention in survey
+      survey_id == "york_can" & grade == "A+" ~ 95,
+      survey_id == "york_can" & grade == "A" ~ 84.5,
+      survey_id == "york_can" & grade == "B+" ~ 77,
+      survey_id == "york_can" & grade == "B" ~ 72,
+      survey_id == "york_can" & grade == "C+" ~ 67,
+      survey_id == "york_can" & grade == "C" ~ 62,
+      survey_id == "york_can" & grade == "D+" ~ 57,
+      survey_id == "york_can" & grade == "D" ~ 52,
+      survey_id == "york_can" & grade == "E" ~ 44.5,
+      survey_id == "york_can" & grade == "F" ~ 0,
+      TRUE ~ as.numeric(grade)
+    )
+  )
+df_clean_with_grade <- df_clean_with_grade %>%
+  mutate(
+    grade = case_when(
+      survey_id == "vienna" ~ as.numeric(grade) * 20,
+      survey_id == "uc_louvain" ~ as.numeric(grade) * 5,
+      survey_id == "rotterdam" ~ as.numeric(grade) * 10,
+      survey_id == "la_laguna" ~ as.numeric(grade) * 10,
+      survey_id == "hungary" ~ as.numeric(grade) * 20,
+      TRUE ~ as.numeric(grade) 
+    )
+  )%>%
+  filter(!is.na(grade))%>%
+  filter(grade != 0)%>%
+  select(STARS,
+    RMARS,
+    RTAS,
+    STICSA,
+    grade)%>%
+  filter(grade > 20)
+
+```
+
+
+```{r, echo=FALSE, message=FALSE, eval=FALSE}
+p1 <- ggplot(df_clean_with_grade, aes(x = STARS)) + 
+  geom_histogram(binwidth = 0.5, fill = "blue", alpha = 0.6, color = "black") + 
+  theme_minimal() + 
+  labs(title = "Histogram of STARS Anxiety Score", x = "STARS", y = "Count")
+
+p2 <- ggplot(df_clean_with_grade, aes(x = RMARS)) + 
+  geom_histogram(binwidth = 0.5, fill = "red", alpha = 0.6, color = "black") + 
+  theme_minimal() + 
+  labs(title = "Histogram of RMARS Anxiety Score", x = "RMARS", y = "Count")
+
+p3 <- ggplot(df_clean_with_grade, aes(x = RTAS)) + 
+  geom_histogram(binwidth = 0.5, fill = "green", alpha = 0.6, color = "black") + 
+  theme_minimal() + 
+  labs(title = "Histogram of R-TAS Anxiety Score", x = "R-TAS", y = "Count")
+
+p4 <- ggplot(df_clean_with_grade, aes(x = STICSA)) + 
+  geom_histogram(binwidth = 0.5, fill = "purple", alpha = 0.6, color = "black") + 
+  theme_minimal() + 
+  labs(title = "Histogram of STICSA-Trait Anxiety Score", x = "STICSA-Trait", y = "Count")
+
+# Arrange in a grid
+grid.arrange(p1, p2, p3, p4, ncol = 2)
+
+```
+
+
+```{r, echo=TRUE, eval=FALSE}
+# Data Cleaning Sample Code, Please See Appendix for Full Code
+# For time-progress ratio, we have code
+mutate(time_progress_ratio = duration / progress)#Mutate time-progress ratio
+filter(time_progress_ratio >= lower_bound_ratio) #Replace bound with "<=upper_bound_ratio". We set bound to 0.05. 
+#To clean participants who failed attention check we have code
+filter(Q7.1_24 == "1") #Replace 'Q7.1_24 =="1"' with other attention checks
+# For anxiety variables we have code
+ mutate(STARS = rowMeans(select(., starts_with("Q7.1_")) %>% select(-Q7.1_24), na.rm = TRUE)) #This takes mean of STARS, excluding attention check, same for other anxiety variables
+# To remove empty grade filled with "Not Applicable" we have code
+mutate(grade = na_if(grade, "Not Available")) #Then use `filter(!is.na(grade))` to remove all na values
+# To rescale character grade we have code
+ mutate(grade = case_when(grade == "A" & grade_category_notes == "A > 80, 75 < B+ ≤ 80, 69 < B ≤ 75, 60 < C+ ≤ 69, 55 < C ≤ 60, 50 < D+ ≤ 55, 44 < D ≤ 50, E < 44" ~ 90)) # Replace "A" and category notes as required. For data with empty notes, we search university official site to get grade categories. 
+ # To rescale numeric grade we have code
+ mutate(grade = gsub("%", "", grade) ) # We first remove percentage sign
+ as.numeric(grade) #This is essential since the variable is originally character
+ # For non-hundred scale grades we convert it by multiplying (100/max scale)
+ mutate(grade = casewhen(survey_id == "vienna" ~ grade * 20) # Replace university survey id and ratio for different scales
+# To ensure no non-submission, which should be 0, we have code
+filter(grade!=20)
+```
+`The code above is our sample code to display, showing how we clean data. Please find full code in our github repo(link in Appendix).`
+
+### Description of Data
+
+Our data is from SMARVUS dataset (Terry et al., 2023), which includes
+large amount of surveys regarding our topic that what effect does
+statistics anxiety have on attainment. After data-cleaning by using
+$5\%$ progress-time ratio test and build-in attention check, and
+extracting of grade results, we finally obtain $1277$ valid
+observations. By original survey, we extract 4 variables of anxiety and take their mean value:
+
+-   STARS: Statistics Anxiety Rating Scale which measures statistics
+    anxiety, scale from 1 to 5.
+
+-    R-MARS: Revised Maths Anxiety Rating Scale which measures math
+    anxiety, scale from 1 to 5.
+
+-   STICSA-Trait: State-Trait Inventory of Cognitive and Somatic Anxiety
+    which measures mental and physical symptoms of anxiety, scale from 1
+    to 4.
+
+-   R-TAS: Revised Test Anxiety Scale which measures test anxiety, scale
+    from 1 to 4.
+
+On the attainment side, we choose to use variable `grade` in the dataset
+to measure attainment. We extract all grade values by the survey
+question "The grade (mark) awarded for the statistics module the student
+participants were taking at the time of completing the survey." from the
+original dataset "SMARVUS_complete.csv" and rescale all(including
+character grades) to 0-100 scale.
+
+# Model Choice
+
+### Linear Regression: Grade vs. STARS
+
+We first perform a linear regression between grade and STARS score because the relationship appeared approximately linear based on the scatterplot and correlation matrix. Linear regression is suitable for continuous outcome variables and allows for straightforward interpretation of effect size and direction.(see code, output summary and visualization below).
+
+```{r}
+#  LM grade STARS
+lm_model_super_simple <- lm(grade ~ STARS, data = df_clean_with_grade)
+summary(lm_model_super_simple)
+
+```
+
+```{r, warning=FALSE}
+ggplot(df_clean_with_grade, aes(x = STARS, y = grade))+
+         geom_point()+
+         stat_smooth(method = "lm", formula = y ~ x)
+```
+
+The p values, which are all less than 0.05 and very small, suggest that
+this model is statistical significant. There is a negative effect of
+statistics anxiety STARS on grades. The formula is given by: 
+$$
+Grade = 74.51 - 1.79 \times avg(STARS)
+$$ 
+However, statistical significance does not always imply practical
+significance. The $r^2$ of the model is $0.01$, implying approximately $1\%$ of the variance in the dependent variable grade is explained by the independent variable STARS. To further assess the strength and relevance of this
+effect in an educational context, we turn to effect size by Cohen's d,
+which provides a standardized measure of the impact of anxiety on
+grades.
+
+```{r}
+library(effectsize)
+
+cor_test_result <- cor.test(df_clean_with_grade$grade, df_clean_with_grade$STARS)
+
+# Extract Pearson correlation coefficient (r)
+r_value <- cor_test_result$estimate
+
+# Convert r to d
+d_value <- r_to_d(r_value)
+
+# Extract ci for r and convert to d
+d_CI <- r_to_d(c(cor_test_result$conf.int))
+
+n_value <- nrow(df_clean_with_grade)
+
+cat(sprintf("d = %.3f, 95%% CI [%.3f, %.3f] based on N = %d.\n", d_value, d_CI[1], d_CI[2], n_value))
+
+
+```
+
+### Effect Size
+
+The code chunk above gives: $d = -0.206$, $95\%$CI = [$-0.316$,
+$-0.096$] based on $N = 1277$. The Cohen's d result for statistics
+anxiety STARS indicates a small negative relationship with grade. As
+STARS scores increase (indicating higher statistics anxiety), students
+tend to have lower exam grades. Cohen's d of $-0.206$ is considered a
+small effect according to conventional benchmarks (Cohen, 1988).
+However, in educational research, even small effects can be meaningful
+when applied to large student populations (Kraft, 2018).
+
+The 95% confidence interval [$-0.316$, $-0.096$] indicates that we are
+fairly confident the true effect lies in this range. Since the interval
+does not contain zero, this effect is statistically significant.
+
+This result aligns with prior findings that anxiety, even at a low
+effect size, can still have an impact on academic performance. Given
+that STARS anxiety is only one of multiple anxiety dimensions, further
+investigation into other types (such as math, test and physical anxiety
+scores) may provide a more comprehensive understanding of how statistics
+anxiety influences attainment.
+
+### Power Analysis
+
+To show the power of this linear regression model in large population,
+we perform a power analysis.
+
+```{r}
+# Convert d to r
+effect_size_r <- d_to_r(0.206)
+
+n_r <- pwr.r.test(r = effect_size_r, power = 0.8, sig.level = 0.05)$n
+
+cat(sprintf("Required sample size for STARS to reach 80%% power: %.0f participants\n", n_r))
+
+```
+
+By results above, we conclude that for our linear regression modedl with
+small Cohen's d of $-0.206$, $745$ participants are needed to reach
+$80\%$ of power. This indicates that once the sample size exceeds the
+threshold of $745$, the effect of $STARS$ will have an $80\%$
+probability of being detected as statistically significantat. In this
+study, our valid participants is $1277$, which is greater than $745$,
+suggesting statistical significance.
+
+# Multiple Polynomial Regression Model
+
+### Potential Model Fit
+
+To examine how multiple facets of anxiety collectively influence
+attainment, we test polynomial regression model. Since we have already
+classified the anxiety, we use the final dataset to test possible
+multiple polynomial regression models by mixing different variables. We set a "must be included" variable STARS.
+Then each anxiety variable (STARS, R-TAS, R-MARS, STICSA) was raised to
+exponents ranging from $0.5$ to $3$ (with a $0.5$ step), and we included
+only those models where all predictors---and the overall model---were
+statistically significant ($p < 0.05$).
+
+```{r, message=FALSE, eval=TRUE,warning=FALSE, echo=FALSE}
+### Exhaustive Method
+# Parallel processing setup
+plan(multisession, workers = 18)  # Adjust based on your CPU cores
+
+# Define dataset
+df_loop <- df_clean_with_grade  
+
+# Define predictor variables
+predictor_vars <- c("STARS", "RTAS", "RMARS", "STICSA")
+
+# Define exponents
+exponents <- seq(0.5, 3, by = 0.5)
+
+# Store results
+significant_models <- list()
+
+# Loop over exponent combinations for all 4 variables
+for (exp1 in exponents) {
+  for (exp2 in exponents) {
+    for (exp3 in exponents) {
+      for (exp4 in exponents) {
+        
+        # Define transformed variables
+        transformed_vars <- paste0("I(", predictor_vars, "^", c(exp1, exp2, exp3, exp4), ")")
+
+        # Construct formula
+        formula <- as.formula(paste("grade ~", paste(transformed_vars, collapse = " + ")))
+
+        # Fit model
+        model <- lm(formula, data = df_loop)
+
+        # Extract p-values
+        p_values <- summary(model)$coefficients[-1, 4]  # Exclude intercept p-value
+        f_p_value <- summary(model)$fstatistic  
+        f_p <- pf(f_p_value[1], f_p_value[2], f_p_value[3], lower.tail = FALSE)
+
+        # **NEW CONDITION**: Ensure **ALL** predictor p-values < 0.05 AND overall model is significant
+        if (all(p_values < 0.05) & f_p < 0.05) {
+          significant_models <- append(significant_models, list(list(
+            formula = formula,
+            coefficients = summary(model)$coefficients,
+            f_p_value = f_p
+          )))
+        }
+      }
+    }
+  }
+}
+```
+```{r, echo=TRUE, message=FALSE, eval=FALSE}
+# Core Code of Exhausive Indexing Method
+for (var_combo in combn(predictor_vars, 2, simplify = FALSE)) {  # Select 2 out of RTAS, RMARS, STICSA
+  selected_vars <- c("STARS", var_combo)  # Ensure STARS is always included
+for (exp1 in exponents) {
+    for (exp2 in exponents) {
+      for (exp3 in exponents) {transformed_vars <- paste0("I(", selected_vars, "^", c(exp1, exp2, exp3), ")")
+formula <- as.formula(paste("grade ~", paste(transformed_vars, collapse = " + ")))
+model <- lm(formula, data = df_loop)
+        p_values <- summary(model)$coefficients[-1, 4]  # Exclude intercept p-value
+        f_p_value <- summary(model)$fstatistic  
+        f_p <- pf(f_p_value[1], f_p_value[2], f_p_value[3], lower.tail = FALSE)
+        # Ensure **ALL** predictor p-values < 0.05 AND overall model is significant
+        if (all(p_values < 0.05) & f_p < 0.05) {
+          significant_models <- append(significant_models, list(list(
+            formula = formula,
+            coefficients = summary(model)$coefficients,
+            f_p_value = f_p)))}}} }}
+```
+`The above code chunk shows sample code of exhausive indexing method. Please find full code in our github repo(link in Appendix).`
+```{r, echo=FALSE, message=FALSE, warning=FALSE}
+plan(multisession, workers = 18)  # Adjust based on your CPU cores
+
+# Define predictor variables
+predictor_vars <- c("RTAS", "RMARS", "STICSA")
+
+# Define exponents
+exponents <- seq(0.5, 3, by = 0.5)
+
+# Store results
+significant_models <- list()
+
+# Loop over exponent combinations for 3 variables (STARS + 2 others)
+for (var_combo in combn(predictor_vars, 2, simplify = FALSE)) {  # Select 2 out of RTAS, RMARS, STICSA
+  selected_vars <- c("STARS", var_combo)  # Ensure STARS is always included
+  
+  for (exp1 in exponents) {
+    for (exp2 in exponents) {
+      for (exp3 in exponents) {
+
+        
+        # Define transformed variables
+        transformed_vars <- paste0("I(", selected_vars, "^", c(exp1, exp2, exp3), ")")
+
+
+        # Construct formula
+        formula <- as.formula(paste("grade ~", paste(transformed_vars, collapse = " + ")))
+
+        # Fit model
+        model <- lm(formula, data = df_loop)
+
+        # Extract p-values
+        p_values <- summary(model)$coefficients[-1, 4]  # Exclude intercept p-value
+        f_p_value <- summary(model)$fstatistic  
+        f_p <- pf(f_p_value[1], f_p_value[2], f_p_value[3], lower.tail = FALSE)
+
+        # Ensure **ALL** predictor p-values < 0.05 AND overall model is significant
+        if (all(p_values < 0.05) & f_p < 0.05) {
+          significant_models <- append(significant_models, list(list(
+            formula = formula,
+            coefficients = summary(model)$coefficients,
+            f_p_value = f_p
+          )))
+        }
+      }
+    }
+  }
+}
+# Initialize variables to store the best model
+best_model <- NULL
+highest_r_squared <- -Inf  # Start with a very low value
+
+# Loop through the significant models
+for (model_info in significant_models) {
+  # Fit the model
+  model <- lm(model_info$formula, data = df_clean_with_grade)
+  
+  # Extract R-squared
+  r_squared <- summary(model)$r.squared
+  
+  # Update best model if R-squared is higher
+  if (r_squared > highest_r_squared) {
+    highest_r_squared <- r_squared
+    best_model <- model_info
+  }
+}
+
+# Display the best model
+print(best_model)
+cat("Highest R-squared:", highest_r_squared, "\n")
+
+```
+
+`The return result is a best-fit model by choosing highest R-squared.`
+
+```{r, echo=FALSE, message=FALSE}
+model_display = lm(grade ~ I(STARS^2) + I(RTAS^3) + I(STICSA^0.5), data = df_clean_with_grade)
+
+```
+
+```{r, echo=FALSE}
+all_variables <- unlist(lapply(significant_models, function(x) {
+  if (!is.null(x$coefficients)) {
+    return(rownames(x$coefficients)[-1])  # Exclude intercept
+  } else {
+    return(NULL)  
+  }
+}))
+
+variable_counts <- as.data.frame(table(all_variables))
+
+colnames(variable_counts) <- c("Variable", "Appearance in Significant Models")
+library(knitr)
+kable(variable_counts, caption = "Variable Appearance in Significant Models")
+```
+
+`The table shows what variables are chosen by significance test.`
+`Note that no R-MARS in our potential models.`
+
+### Final Model
+Throughout this process, we find that R-MARS does not appear in any significant
+models. We select the model with the highest R-squared. Thus the
+model we choose can be formulated as: 
+$$
+Grade = 60.18 -  0.35(avg(STARS))^2 - 0.12(avg(R-TAS))^3 + 9.73(avg(STICSA))^{0.5}.
+$$ 
+All predictors and the model itself are significant. By the result, we find that both STARS and R-TAS have negative effect on grade, while STICSA has positive effect. This model not only emphasizes negative effect of STARS on grade, but also takes into account other anxiety factors that may affect performance. This model has $r^2$ of $0.02$, indicating approximately $2\%$ of the variance in the dependent variable can be explained by the independent variables. $r^2$ is double that of the precious simple linear model, which shows stronger prediction. Visualization of the model is showing below.
+
+```{r, message=TRUE, echo=FALSE, warning=FALSE}
+
+# Create a grid of values for two predictors (STARS and RTAS)
+grid <- expand.grid(
+  STICSA = seq(min(df_clean_with_grade$STICSA, na.rm = TRUE), 
+              max(df_clean_with_grade$STICSA, na.rm = TRUE), length.out = 30),
+  RTAS = seq(min(df_clean_with_grade$RTAS, na.rm = TRUE), 
+             max(df_clean_with_grade$RTAS, na.rm = TRUE), length.out = 30)
+)
+
+# Predict grades while keeping STICSA at its median value
+grid$Predicted_Grade <- predict(model_display, newdata = data.frame(
+  STICSA = grid$STICSA, 
+  RTAS = grid$RTAS,
+  STARS = median(df_clean_with_grade$STARS, na.rm = TRUE)
+))
+
+# Plot 3D Surface
+plot_ly(grid, x = ~STICSA, y = ~RTAS, z = ~Predicted_Grade, 
+        type = "scatter3d", mode = "markers", marker = list(size = 2)) %>%
+  layout(title = "Predicted Grades Based on STARS and RTAS with Fixed STARS",
+         scene = list(xaxis = list(title = "STICSA"),
+                      yaxis = list(title = "RTAS"),
+                      zaxis = list(title = "Predicted Grade")))
+
+```
+To further examine how good the model fit is, we visualize a residual plot. 
+```{r, echo=FALSE, warning=FALSE}
+ggplot(data.frame(Fitted = fitted(model_display), Residuals = resid(model_display)), 
+       aes(x = Fitted, y = Residuals)) +
+  geom_point(alpha = 0.5) +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "red") +
+  labs(title = "Residuals vs. Fitted Values",
+       x = "Fitted Values (Predicted Grades)", y = "Residuals") +
+  theme_minimal()
+
+```
+
+The residual plot shows "no-pattern" despite some overlapping linear points clustered at grade between $65$ and $72$. This could be the dataset containing too many grades at around this gap. To explore this, we do a visualization of grade. 
+
+```{r}
+ggplot(data = df_clean_with_grade, aes(x = grade))+
+  geom_density()+
+  labs(title = "Grades Density",
+       x = "grade") +
+  theme_minimal()
+```
+
+This confirms our suspicions. We thus confirm a good fit of the multiple polynomial regression model above. 
+
+
+## Conclusion
+
+In summary, our analysis provides evidence that statistics-specific anxiety, as measured by STARS, exerts a small yet meaningful negative effect on grades (Cohen's d = -0.206). The 95% confidence interval does not include zero, indicating that this effect is statistically significant.  
+
+Further exploration using polynomial regression models revealed that while both STARS and R-TAS exhibited negative associations with attainment, STICSA demonstrated a positive effect. Notably, math anxiety (R-MARS) was not retained in any of the final significant models, suggesting that math anxiety might be highly correlated with another variables already in the model. Since we set STARS as must-be-included, it might be correlated with STARS.  
+
+These findings underscore the importance of addressing statistics anxiety in educational settings. Targeted interventions and curricular modifications aimed at reducing statistics anxiety could potentially enhance student performance and foster more positive learning experiences.  
+
+### Limitations and Future Directions
+
+This study is limited by the use of self-reported survey data, which may introduce response bias. Additionally, the cross-sectional nature of the data prevents causal inference. Future research could explore longitudinal designs to establish causal pathways and investigate potential interaction effects between different forms of anxiety(for example math anxiety and statistics anxiety as mentioned in conclusion). 
+
+# Reference
+
+Cohen, J. (1988). Statistical power analysis for the behavioral sciences
+(2nd ed.). Hillsdale, N.J.: Lawrence Erlbaum. 
+
+Data: SMARVUS dataset
+(Terry et al., 2023), url: <https://osf.io/mhg94/>
+
+# Appendix
+Please find full code in rmd file on github. Link: https://github.com/FelixFungKeihung/Statistics-in-Education-Assignment-2---Many-Analysis-Group-12
